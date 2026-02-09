@@ -125,21 +125,45 @@ class LoggingHandler(BaseHTTPRequestHandler):
 # ---- server wrapper ------------------------------------------------------
 
 class LogServer(ThreadingHTTPServer):
-    def __init__(self, server_address, handler_cls, response_body: bytes, content_type: str, logger: logging.Logger):
+    def __init__(
+        self,
+        server_address,
+        handler_cls,
+        response_body: bytes,
+        content_type: str,
+        logger: logging.Logger,
+        max_log_body_chars: int,
+    ):
         super().__init__(server_address, handler_cls)
         self.response_body = response_body
         self.response_content_type = content_type
         self.logger = logger
+        self.max_log_body_chars = max_log_body_chars
         self.allow_reuse_address = True
 
     def log_request(self, method: str, path: str, url: str, headers: Dict[str, str], body: bytes, client: str):
         timestamp = _dt.datetime.now().isoformat(timespec="seconds")
-        body_utf8 = body.decode("utf-8", errors="replace") if body else ""
-        body_b64 = base64.b64encode(body).decode("ascii") if body else ""
+
+        body_utf8_full = body.decode("utf-8", errors="replace") if body else ""
+        body_b64_full = base64.b64encode(body).decode("ascii") if body else ""
+
+        limit = self.max_log_body_chars
+
+        def _truncate(text: str) -> str:
+            if limit is None or limit <= 0 or len(text) <= limit:
+                return text
+            return f"{text[:limit]}... [truncated, total {len(text)} chars]"
+
+        body_utf8 = _truncate(body_utf8_full)
+        body_b64 = _truncate(body_b64_full)
 
         curl_cmd = build_curl(method, url, headers, body)
         httpie_cmd = build_httpie(method, url, headers, body)
         requests_snippet = build_python_requests(method, url, headers, body)
+
+        curl_cmd_log = _truncate(curl_cmd)
+        httpie_cmd_log = _truncate(httpie_cmd)
+        requests_snippet_log = _truncate(requests_snippet)
 
         headers_block = "\n".join(f"  - {k}: {v}" for k, v in headers.items()) or "  - (none)"
 
@@ -157,11 +181,11 @@ class LogServer(ThreadingHTTPServer):
             f"  base64: {body_b64}",
             "replay:",
             "  curl: |",
-            textwrap.indent(curl_cmd, "    "),
+            textwrap.indent(curl_cmd_log, "    "),
             "  httpie: |",
-            textwrap.indent(httpie_cmd, "    "),
+            textwrap.indent(httpie_cmd_log, "    "),
             "  python_requests: |",
-            textwrap.indent(requests_snippet, "    "),
+            textwrap.indent(requests_snippet_log, "    "),
             f"----- REQUEST END {timestamp} -----\n",
         ]
         self.logger.info("\n".join(lines))
@@ -186,6 +210,12 @@ def parse_args() -> argparse.Namespace:
         "--log-file",
         default="requests.log",
         help="Path to append request logs (default: requests.log)",
+    )
+    parser.add_argument(
+        "--max-log-body-chars",
+        type=int,
+        default=1000,
+        help="Truncate logged body/base64/replay bodies to this many characters (0 or negative disables truncation)",
     )
     parser.add_argument(
         "--clear-log",
@@ -248,7 +278,14 @@ def main():
 
     logger = configure_logger(args.log_file)
 
-    server = LogServer((args.host, args.port), LoggingHandler, response_body, content_type, logger)
+    server = LogServer(
+        (args.host, args.port),
+        LoggingHandler,
+        response_body,
+        content_type,
+        logger,
+        args.max_log_body_chars,
+    )
 
     logger.info(
         "Starting server on %s:%s, responding with contents of %s (Content-Type: %s)",
