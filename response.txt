@@ -1,0 +1,5 @@
+{
+  "status": "ok",
+  "message": "Hello from log-server",
+  "timestamp_example": "2026-02-09T12:00:00Z"
+}
